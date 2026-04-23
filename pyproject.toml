@@ -1,0 +1,40 @@
+# adapted from LBM: https://github.com/gojasper/LBM
+
+[build-system]
+requires = ["hatchling", "hatch-requirements-txt"]
+build-backend = "hatchling.build"
+
+[project]
+name = "syncfix"
+dynamic = ["dependencies", "optional-dependencies"]
+description = "SyncFix: Fixing 3D Reconstructions via Multi-View Synchronization"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "Deming Li", email = "dli00@jhu.edu" },
+]
+maintainers = [
+    { name = "Deming Li", email = "dli00@jhu.edu" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
+version = "0.1"
+
+[project.urls]
+Homepage = "https://github.com/gojasper/SyncFix"
+Repository = "https://github.com/gojasper/SyncFix"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.metadata.hooks.requirements_txt]
+files = ["requirements.txt"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/syncfix"]
