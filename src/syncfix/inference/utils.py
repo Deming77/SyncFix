@@ -126,7 +126,7 @@ def get_pretrained_model(
 
     if len(model_files) == 0:
         raise ValueError("No model files found in the model directory")
-    breakpoint()
+
     with open(os.path.join(model_dir, yaml_file[0]), "r") as f:
         config = yaml.safe_load(f)
 
@@ -135,7 +135,7 @@ def get_pretrained_model(
     if len(safetensors_files) > 0:
         logging.info(f"Loading safetensors file: {safetensors_files[-1]}")
         sd = load_file(os.path.join(model_dir, safetensors_files[-1]))
-        model.load_state_dict(sd, strict=True)
+        model.load_state_dict(sd, strict=False)
     elif len(ckpt_files) > 0:
         logging.info(f"Loading ckpt file: {ckpt_files[-1]}")
         sd = torch.load(

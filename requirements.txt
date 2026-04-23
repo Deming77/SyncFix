@@ -23,3 +23,4 @@ wandb==0.16.2
 webdataset>=0.2.86
 kornia==0.8.0
 imageio==2.37.2
+numba==0.65.0
