@@ -33,7 +33,7 @@ def evaluate_batch(
     source_images: Sequence[Image.Image],
     num_sampling_steps: int = 1,
     resize_hw: Tuple[int, int] = (480, 960),
-    num_reference_samples: int = 0,
+    num_reference_samples: int = -1,
 ) -> List[Image.Image]:
     """
     Evaluate model on a batch of source images.
@@ -55,7 +55,7 @@ def evaluate_batch(
     H, W = resize_hw
 
     # calculate number of reference images to be sliced after model prediction
-    if num_reference_samples != 0:
+    if num_reference_samples != -1:
         ref_size = num_reference_samples
     else:
         ref_size = int(len(source_images)/2)
@@ -76,7 +76,10 @@ def evaluate_batch(
         conditioner_inputs=batch,
         max_samples=x.shape[0],
         num_reference_samples=ref_size,
-    ).clamp(-1, 1)[:-ref_size, ...] #[:ref_size, ...]
+    ).clamp(-1, 1)
+    
+    if ref_size > 0:
+        out = out[:-ref_size, ...]
 
     out = (out.float().cpu() + 1.0) / 2.0
     to_pil = ToPILImage()

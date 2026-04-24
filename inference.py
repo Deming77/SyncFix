@@ -44,35 +44,57 @@ if __name__ == "__main__":
     else:
         input_images = [args.input_image]
 
-    # Load reference images if provided
+    ref_images = None
+
+    # Case 1: build reference list from COLMAP nearest-view matching
     if args.colmap_path is not None:
+        if args.ref_image is None:
+            raise ValueError("args.ref_image must be a directory when args.colmap_path is provided.")
+
         colmap_images = read_images_binary(str(colmap_path))
         name_to_center = build_name_to_center(colmap_images)
+
         ref_images = []
         for name in input_images:
             eval_to_ref = closest_train_for_eval(train_images, [name], name_to_center)
             ref_image_name = eval_to_ref[name]
             ref_images.append(os.path.join(args.ref_image, ref_image_name))
-    else:
-        if args.ref_image is not None:
-            if os.path.isdir(args.ref_image):
-                ref_images = [
-                    str(p) for p in Path(args.ref_image).iterdir() 
-                    if p.suffix in exts
-                ]
-            else:
-                ref_images = [args.ref_image]
 
-    ref_images = ref_images[:args.ref_size]
+    # Case 2: user directly provides reference image(s)
+    elif args.ref_image is not None:
+        ref_path = Path(args.ref_image)
+        if ref_path.is_dir():
+            ref_images = sorted(
+                str(p) for p in ref_path.iterdir()
+                if p.suffix.lower() in exts
+            )
+        else:
+            ref_images = [str(ref_path)]
+
+    # Case 3: no reference
+    else:
+        ref_images = None
+
+    # Optional truncation
+    if ref_images is not None:
+        ref_images = ref_images[:args.ref_size]
+        if len(ref_images) == 0:
+            ref_images = None
 
     # Process images
     output_images = []
     n = args.n_per_pass
     for i in tqdm(range(0, len(input_images), n), desc="Processing images"):
         images = [Image.open(img).convert('RGB') for img in input_images[i:i+n]]
-        ref_image = [Image.open(img).convert('RGB') for img in ref_images[i:i+n]] if args.ref_image is not None else None
-        user_defined_ref_size = 0 if ref_image is None else len(ref_image)
-        images.extend(ref_image)
+        if ref_images is not None:
+            batch_ref_paths = ref_images[i:i+n]
+            batch_ref_images = [Image.open(img).convert("RGB") for img in batch_ref_paths]
+            user_defined_ref_size = len(batch_ref_images)
+            images.extend(batch_ref_images)
+        else:
+            batch_ref_images = None
+            user_defined_ref_size = 0
+        breakpoint()
         outs = evaluate_batch(
             model,
             images,
@@ -80,6 +102,7 @@ if __name__ == "__main__":
             resize_hw=(args.height, args.width),
             num_reference_samples=user_defined_ref_size
         )
+        breakpoint()
         output_images.extend(outs)
 
     # Save outputs
