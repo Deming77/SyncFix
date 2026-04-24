@@ -94,7 +94,7 @@ if __name__ == "__main__":
         else:
             batch_ref_images = None
             user_defined_ref_size = 0
-        breakpoint()
+
         outs = evaluate_batch(
             model,
             images,
@@ -102,7 +102,7 @@ if __name__ == "__main__":
             resize_hw=(args.height, args.width),
             num_reference_samples=user_defined_ref_size
         )
-        breakpoint()
+        
         output_images.extend(outs)
 
     # Save outputs
