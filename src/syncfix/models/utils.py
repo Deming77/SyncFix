@@ -1,104 +1,10 @@
 import logging
 import math
 from copy import deepcopy
-from typing import List, Tuple
+from typing import List
 
 import torch
 import torch.nn.functional as F
-
-class DepthNormalizerBase:
-    is_absolute = None
-    far_plane_at_max = None
-
-    def __init__(
-        self,
-        norm_min=-1.0,
-        norm_max=1.0,
-    ) -> None:
-        self.norm_min = norm_min
-        self.norm_max = norm_max
-        raise NotImplementedError
-
-    def __call__(self, depth, valid_mask=None, clip=None):
-        raise NotImplementedError
-
-    def denormalize(self, depth_norm, **kwargs):
-        # For metric depth: convert prediction back to metric depth
-        # For relative depth: convert prediction to [0, 1]
-        raise NotImplementedError
-
-
-class ScaleShiftDepthNormalizer(DepthNormalizerBase):
-    """
-    Use near and far plane to linearly normalize depth,
-        i.e. d' = d * s + t,
-        where near plane is mapped to `norm_min`, and far plane is mapped to `norm_max`
-    Near and far planes are determined by taking quantile values.
-    """
-
-    is_absolute = False
-    far_plane_at_max = True
-
-    def __init__(
-        self, norm_min=-1.0, norm_max=1.0, min_max_quantile=0.02, clip=True
-    ) -> None:
-        self.norm_min = norm_min
-        self.norm_max = norm_max
-        self.norm_range = self.norm_max - self.norm_min
-        self.min_quantile = min_max_quantile
-        self.max_quantile = 1.0 - self.min_quantile
-        self.clip = clip
-    
-    def __call__(self, source_depth, target_depth=None, valid_mask=None):
-        if target_depth is not None:
-            concat_depth = torch.stack((source_depth, target_depth), dim=1)
-            depth_norm = torch.empty_like(concat_depth)
-            for i in range(concat_depth.shape[0]):
-                d = concat_depth[i]  # (H,W)
-                dn = self.normalize(d.float(), valid_mask[i])
-                depth_norm[i] = dn.to(depth_norm.dtype)
-            return depth_norm[:,0,...], depth_norm[:,1,...]
-        else:
-            depth_norm = torch.empty_like(source_depth)
-            for i in range(source_depth.shape[0]):
-                d = source_depth[i]  # (H,W)
-                dn = self.normalize(d.float(), valid_mask[i])
-                depth_norm[i] = dn.to(depth_norm.dtype)
-            return depth_norm
-
-    def normalize(self, depth_linear, valid_mask=None, clip=None):
-        clip = clip if clip is not None else self.clip
-
-        if valid_mask is None:
-            valid_mask = torch.ones_like(depth_linear).bool()
-        else:
-            if valid_mask.dim() != depth_linear.dim():
-                valid_mask = valid_mask.unsqueeze(0).expand(depth_linear.shape[0], -1, -1, -1)
-        valid_mask = valid_mask & (depth_linear > 0)
-        # Take quantiles as min and max
-        _min, _max = torch.quantile(
-            depth_linear[valid_mask],
-            torch.tensor([self.min_quantile, self.max_quantile]).to(depth_linear.device),
-        )
-        # scale and shift
-        depth_norm_linear = (depth_linear - _min) / (
-            _max - _min
-        ) * self.norm_range + self.norm_min
-        if clip:
-            depth_norm_linear = torch.clip(
-                depth_norm_linear, self.norm_min, self.norm_max
-            )
-        return depth_norm_linear
-
-    def scale_back(self, depth_norm):
-        # scale to [0, 1]
-        depth_linear = (depth_norm - self.norm_min) / self.norm_range
-        return depth_linear
-
-    def denormalize(self, depth_norm, **kwargs):
-        logging.warning(f"{self.__class__} is not revertible without GT")
-        return self.scale_back(depth_norm=depth_norm)
-    
 
 TILING_METHODS = ["average", "gaussian", "linear"]
 
@@ -405,24 +311,6 @@ class Tiler:
         output = torch.cat(res_rows, dim=2)
         return output
 
-
-def extract_into_tensor(
-    a: torch.Tensor, t: torch.Tensor, x_shape: Tuple[int, ...]
-) -> torch.Tensor:
-    """
-    Extracts values from a tensor into a new tensor using indices from another tensor.
-
-    :param a: the tensor to extract values from.
-    :param t: the tensor containing the indices.
-    :param x_shape: the shape of the tensor to extract values into.
-    :return: a new tensor containing the extracted values.
-    """
-
-    b, *_ = t.shape
-    out = a.gather(-1, t)
-    return out.reshape(b, *((1,) * (len(x_shape) - 1)))
-
-
 def pad(x: torch.Tensor, base_h: int, base_w: int) -> torch.Tensor:
     """
     Pads a tensor to the nearest multiple of base_h and base_w.
@@ -440,31 +328,3 @@ def pad(x: torch.Tensor, base_h: int, base_w: int) -> torch.Tensor:
     if h_ != h:
         x = F.pad(x, (0, 0, 0, abs(h_ - h)))
     return x
-
-
-def append_dims(x: torch.Tensor, target_dims: int) -> torch.Tensor:
-    """Appends dimensions to the end of a tensor until it has target_dims dimensions."""
-    dims_to_append = target_dims - x.ndim
-    if dims_to_append < 0:
-        raise ValueError(
-            f"input has {x.ndim} dims but target_dims is {target_dims}, which is less"
-        )
-    return x[(...,) + (None,) * dims_to_append]
-
-
-@torch.no_grad()
-def update_ema(
-    target_params: List[torch.Tensor],
-    source_params: List[torch.Tensor],
-    rate: float = 0.99,
-):
-    """
-    Update target parameters to be closer to those of source parameters using
-    an exponential moving average.
-
-    :param target_params: the target parameter sequence.
-    :param source_params: the source parameter sequence.
-    :param rate: the EMA rate (closer to 1 means slower).
-    """
-    for targ, src in zip(target_params, source_params):
-        targ.detach().mul_(rate).add_(src, alpha=1 - rate)

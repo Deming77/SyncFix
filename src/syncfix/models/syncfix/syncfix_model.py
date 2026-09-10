@@ -4,18 +4,22 @@ import lpips
 import numpy as np
 import torch
 import torch.nn as nn
-from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
-from tqdm import tqdm
-from einops import rearrange, repeat
-from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 import torchvision
-# from dreamsim import dreamsim
+from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
+from einops import rearrange
+from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
+from tqdm import tqdm
 
 from ..base.base_model import BaseModel
 from ..embedders import ConditionerWrapper
+from ..loss import gram_loss
 from ..unets import DiffusersUNet2DCondWrapper, DiffusersUNet2DWrapper
 from ..vae import AutoencoderKLDiffusers
 from .syncfix_config import SyncFixConfig
+
+# Relative weight of the VGG Gram (style) term inside the pixel loss.
+GRAM_LOSS_WEIGHT = 0.1
+
 
 def slice_ref(x, B, V):
     x = x.view(B, V, *x.shape[1:])
@@ -23,9 +27,11 @@ def slice_ref(x, B, V):
     x = x.reshape(B * (V - 1), *x.shape[2:])
     return x
 
+
 def rescale(x):
     x = (x + 1.0) / 2.0
     return x
+
 
 class SyncFixModel(BaseModel):
     """This is the SyncFix class which defines the model.
@@ -78,7 +84,6 @@ class SyncFixModel(BaseModel):
         self.latent_loss_type = config.latent_loss_type
         self.latent_loss_weight = config.latent_loss_weight
         self.pixel_loss_type = config.pixel_loss_type
-        self.pixel_loss_max_size = config.pixel_loss_max_size
         self.pixel_loss_weight = config.pixel_loss_weight
         self.logit_mean = config.logit_mean
         self.logit_std = config.logit_std
@@ -86,11 +91,11 @@ class SyncFixModel(BaseModel):
         self.selected_timesteps = config.selected_timesteps
         self.source_key = config.source_key
         self.target_key = config.target_key
-        self.mask_key = config.mask_key
         self.bridge_noise_sigma = config.bridge_noise_sigma
         self.use_l1_pixel_loss = config.use_l1_pixel_loss
-        self.use_depth = config.use_depth
         self.use_ref = config.use_ref
+        self.use_ssim_loss = config.use_ssim_loss
+        self.use_gram_loss = config.use_gram_loss
 
         self.num_iterations = nn.Parameter(
             torch.tensor(0, dtype=torch.float32), requires_grad=False
@@ -104,16 +109,13 @@ class SyncFixModel(BaseModel):
         self.psnr_metric = PeakSignalNoiseRatio(data_range=1.0)
         self.ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0)
 
-        self.use_ssim_loss = config.use_ssim_loss
-        self.use_gram_loss = config.use_gram_loss
-        self.use_dsim_loss = config.use_dsim_loss
-        self.dsim_loss_weight = config.dsim_loss_weight
-
         if self.use_gram_loss:
             self.net_vgg = torchvision.models.vgg16(pretrained=True).features
             for param in self.net_vgg.parameters():
                 param.requires_grad_(False)
-            self.t_vgg_renorm = torchvision.transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+            self.t_vgg_renorm = torchvision.transforms.Normalize(
+                (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
+            )
 
     def on_fit_start(self, device: torch.device | None = None, *args, **kwargs):
         """Called when the training starts"""
@@ -122,6 +124,160 @@ class SyncFixModel(BaseModel):
             self.vae.on_fit_start(device=device, *args, **kwargs)
         if self.conditioner is not None:
             self.conditioner.on_fit_start(device=device, *args, **kwargs)
+
+    def forward(self, batch: Dict[str, Any], *args, **kwargs):
+        """Bridge matching training step.
+
+        The batch holds `V` views per sample, stacked as (B, V, C, H, W). When
+        `use_ref` is set, the last view is a clean reference: it conditions the other
+        views through the joint self-attention but is excluded from the losses.
+        """
+        self.num_iterations += 1
+
+        B = batch[self.target_key].shape[0]
+        V = batch[self.target_key].shape[1] if batch[self.target_key].dim() == 5 else 1
+
+        target_pixels = self._flatten_views(batch[self.target_key])
+        source_pixels = self._flatten_views(batch[self.source_key])
+
+        # Encode both ends of the bridge
+        z = self.vae.encode(target_pixels) if self.vae is not None else target_pixels
+        source_pixels = torch.nn.functional.interpolate(
+            source_pixels,
+            size=target_pixels.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        ).to(z.dtype)
+        z_source = (
+            self.vae.encode(source_pixels) if self.vae is not None else source_pixels
+        )
+
+        conditioning = self._get_conditioning(batch, *args, **kwargs)
+
+        # Interpolate along the bridge: sigma=1 is the degraded end, sigma=0 the clean one
+        timestep = self._timestep_sampling(n_samples=z.shape[0], device=z.device)
+        sigmas = self._get_sigmas(
+            self.training_noise_scheduler, timestep, n_dim=4, device=z.device
+        )
+        noisy_sample = (
+            sigmas * z_source
+            + (1.0 - sigmas) * z
+            + self.bridge_noise_sigma
+            * (sigmas * (1.0 - sigmas)) ** 0.5
+            * torch.randn_like(z)
+        )
+
+        # The largest timestep is the degraded latent itself, with no bridge noise
+        first_timestep = self.training_noise_scheduler.timesteps[0].item()
+        noisy_sample = torch.where(
+            (timestep == first_timestep).view(-1, 1, 1, 1), z_source, noisy_sample
+        )
+
+        prediction = self.denoiser(
+            sample=noisy_sample,
+            timestep=timestep,
+            conditioning=conditioning,
+            num_views=V,
+        )
+
+        # Flipped with respect to the usual flow target because of the sigma convention
+        target = z_source - z
+
+        if self.latent_loss_weight > 0:
+            latent_recon_loss = self.latent_loss(prediction, target.detach(), B, V).mean()
+        else:
+            latent_recon_loss = torch.zeros((), device=z.device, dtype=prediction.dtype)
+
+        denoised_sample = self._predicted_x_0(
+            model_output=prediction,
+            sample=noisy_sample,
+            sigmas=sigmas,
+        )
+
+        if self.pixel_loss_weight > 0:
+            pixel_recon_loss = self.pixel_loss(
+                denoised_sample, target_pixels.detach(), B, V
+            ).mean()
+        else:
+            pixel_recon_loss = torch.zeros((), device=z.device, dtype=prediction.dtype)
+
+        return {
+            "loss": self.latent_loss_weight * latent_recon_loss + pixel_recon_loss,
+            "latent_recon_loss": latent_recon_loss,
+            "pixel_recon_loss": pixel_recon_loss,
+            "predicted_hr": denoised_sample,
+            "noisy_sample": noisy_sample,
+        }
+
+    @staticmethod
+    def _flatten_views(x: torch.Tensor) -> torch.Tensor:
+        """Fold the view dimension of a (B, V, C, H, W) tensor into the batch."""
+        return rearrange(x, "b v c h w -> (b v) c h w") if x.dim() == 5 else x
+
+    def latent_loss(self, prediction, target, B, V):
+        if self.use_ref:
+            prediction = slice_ref(prediction, B, V)
+            target = slice_ref(target, B, V)
+
+        if self.latent_loss_type == "l2":
+            error = (prediction - target) ** 2
+        elif self.latent_loss_type == "l1":
+            error = torch.abs(prediction - target)
+        else:
+            raise NotImplementedError(
+                f"Loss type {self.latent_loss_type} not implemented"
+            )
+
+        return error.reshape(target.shape[0], -1).mean(1)
+
+    def pixel_loss(self, prediction, target, B, V):
+        if self.use_ref:
+            prediction = slice_ref(prediction, B, V)
+            target = slice_ref(target, B, V)
+
+        decoded_prediction = self.vae.decode(prediction).clamp(-1, 1)
+
+        # Decoding a latent rounds the spatial size down to a multiple of the VAE
+        # downsampling factor, so the target has to follow.
+        target = torch.nn.functional.interpolate(
+            target,
+            size=decoded_prediction.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+
+        if self.pixel_loss_type == "l2":
+            error = (decoded_prediction - target) ** 2
+            return error.reshape(target.shape[0], -1).mean(1)
+
+        elif self.pixel_loss_type == "l1":
+            error = torch.abs(decoded_prediction - target)
+            return error.reshape(target.shape[0], -1).mean(1)
+
+        elif self.pixel_loss_type == "lpips":
+            loss = (
+                self.pixel_loss_weight
+                * self.lpips_loss(decoded_prediction, target).mean()
+            )
+            if self.use_l1_pixel_loss:
+                loss = loss + torch.abs(decoded_prediction - target).mean()
+            if self.use_ssim_loss:
+                loss = loss + (
+                    1.0
+                    - self.ssim_metric(rescale(decoded_prediction), rescale(target))
+                )
+            if self.use_gram_loss:
+                loss = loss + GRAM_LOSS_WEIGHT * gram_loss(
+                    self.t_vgg_renorm(rescale(decoded_prediction)),
+                    self.t_vgg_renorm(rescale(target)),
+                    self.net_vgg,
+                )
+            return loss
+
+        else:
+            raise NotImplementedError(
+                f"Loss type {self.pixel_loss_type} not implemented"
+            )
 
     def _get_conditioning(
         self,
@@ -271,7 +427,7 @@ class SyncFixModel(BaseModel):
             )[0]
             if clean_reference is not None:
                 sample[-num_reference_samples:] = clean_reference
-            
+
             # multi-step sampling
             if i < len(self.sampling_noise_scheduler.timesteps) - 1:
                 timestep = (
@@ -323,33 +479,34 @@ class SyncFixModel(BaseModel):
                 raise ValueError(
                     "input_shape must be passed when no VAE is used in the model"
                 )
+        num_views = (
+            batch[self.source_key].shape[1]
+            if batch[self.source_key].dim() == 5
+            else 1
+        )
+        source_image = self._flatten_views(batch[self.source_key])
+        source_image = torch.nn.functional.interpolate(
+            source_image,
+            size=batch[self.target_key].shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        ).to(dtype=self.dtype)
+
+        z = self.vae.encode(source_image) if self.vae is not None else source_image
+
         for num_step in num_steps:
-            if batch[self.source_key].dim() == 5:
-                num_view = batch[self.source_key].shape[1]
-                source_image = rearrange(batch[self.source_key], "b v c h w -> (b v) c h w")
-            else:
-                source_image = batch[self.source_key]
-            source_image = torch.nn.functional.interpolate(
-                source_image,
-                size=batch[self.target_key].shape[-2:],
-                mode="bilinear",
-                align_corners=False,
-            ).to(dtype=self.dtype)
-
-            z = self.vae.encode(source_image) if self.vae is not None else source_image
-
             with torch.autocast(dtype=self.dtype, device_type="cuda"):
                 logs[f"samples_{num_step}_steps"] = self.sample(
                     z,
                     num_steps=num_step,
                     conditioner_inputs=batch,
-                    max_samples=N*num_view,
+                    max_samples=N * num_views,
                 )
 
         return logs
-    
+
     def compute_metrics(self, batch: Dict[str, Any], predicted_sample):
-        target_pixels = rearrange(batch[self.target_key], "b v c h w -> (b v) c h w")
+        target_pixels = self._flatten_views(batch[self.target_key])
 
         decoded_image_prediction = self.vae.decode(predicted_sample)
         decoded_image_prediction = torch.nn.functional.interpolate(
@@ -366,7 +523,3 @@ class SyncFixModel(BaseModel):
             "ssim": float(ssim),
             "lpips": float(lpips.mean()),
         }
-
-
-
-

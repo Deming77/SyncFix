@@ -19,7 +19,7 @@ pip install -e .
 ```
 
 ## Model Checkpoint
-Download the checkpoint [here](https://drive.google.com/drive/folders/1RWGIQig_rUqH8xJXpdIjiUNOKAX1A4qE?usp=sharing).
+Please Download the checkpoint [here](https://drive.google.com/drive/folders/1RWGIQig_rUqH8xJXpdIjiUNOKAX1A4qE?usp=sharing).
 
 ## Inference
 Run the top-level `inference.py` script to refine a degraded rendering or a directory of renderings.
@@ -44,8 +44,61 @@ python inference.py \
 - `--ref_size`: Number of reference images appended to each forward pass.
 - `--colmap_path`: Optional COLMAP path for selecting closest training views as references.
 
+## Dataset
+
+SyncFix is trained on degraded 3DGS renderings paired with their clean ground truth. We
+built our training data with the official
+[3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting) codebase.
+
+The scripts that build such a dataset from your own scenes live in
+[data_creation/](data_creation) and run in three steps:
+
+1. [`build_3dgs_pairs.py`](data_creation/build_3dgs_pairs.py) enumerates one job per
+   (scene, sparsity level `K`, run) into a `jobs.jsonl`. Each job trains a 3DGS model on
+   `K` sparse views and renders the held-out views at the iterations given by
+   `--save_its`, so the renderings are degraded by both sparse supervision and
+   underfitting.
+2. [`run_jobs_multi_gpu.py`](data_creation/run_jobs_multi_gpu.py) executes that job file
+   across several GPUs.
+3. [`make_wds_shards_multi_with_ref.py`](data_creation/make_wds_shards_multi_with_ref.py)
+   packs the renderings into WebDataset shards and splits them into train and eval.
+
+Each shard sample is keyed `{scene}__{K}__{run}__{iteration}__{frame}` and holds the
+degraded rendering (`png`), its clean ground truth (`gt.png`) and a clean reference view
+of the same scene (`ref.png`). The key layout is not cosmetic: the training pipeline
+parses the trailing frame index out of it to group nearby views into one multi-view
+sample.
+
+## Training
+
+Point `train_shards` / `validation_shards` in [configs/train.yaml](configs/train.yaml)
+at the shards produced above and run:
+
+```bash
+python train.py configs/train.yaml
+```
+
+Training uses every visible GPU through DDP. Restrict it with `CUDA_VISIBLE_DEVICES`.
+[configs/train_smoke.yaml](configs/train_smoke.yaml) is a 100-step version of the same
+setup, useful to check the pipeline before launching a full run.
+
+### Main config options
+- `pair_num_views`: number of nearby degraded views synchronized in one sample. One clean
+  reference is appended on top, so the model sees `pair_num_views + 1` views per sample.
+- `pair_window`: maximum frame distance allowed between the paired views.
+- `use_ref`: treat the last view as a clean reference and exclude it from the losses.
+- `pixel_loss_weight`, `use_l1_pixel_loss`, `use_ssim_loss`, `use_gram_loss`: terms of the
+  pixel-space loss applied to the decoded prediction (LPIPS, L1, SSIM and VGG Gram).
+- `selected_timesteps` / `prob`: the timesteps sampled along the bridge and their weights.
+- `pretrained_path`: directory of a previous run to finetune from, instead of starting
+  from the Stable Diffusion XL weights.
+
+Only the denoiser is trained; the VAE, LPIPS and VGG networks stay frozen. Checkpoints and
+a copy of the config are written to `save_ckpt_path`, which is directly usable as the
+`--model_path` of `inference.py`.
+
 ### Acknowledgements
-This project is built upon [LBM](https://github.com/gojasper/LBM) and [Difix3D+](https://github.com/nv-tlabs/Difix3D). We thank all the authors for their great work and for providing the code.
+This project is built upon [LBM](https://github.com/gojasper/LBM), [Difix3D+](https://github.com/nv-tlabs/Difix3D), and [3DGS](https://github.com/graphdeco-inria/gaussian-splatting). We thank all the authors for their great work and for providing the code.
 
 ## Citation
 ```bibtex

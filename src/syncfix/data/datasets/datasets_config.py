@@ -23,6 +23,10 @@ class DataModuleConfig(BaseConfig):
         decoder (str): The decoder to use. Defaults to "pil".
         handler (Callable): A callable to handle the warnings. Defaults to wds.warn_and_continue.
         rename_files_fn (Optional[Callable[[str], str]]): A callable to rename the files. Defaults to None.
+        pair_num_views (int): The number of nearby frames stacked into a single multi-view sample.
+            Values above 1 enable the multi-view pairing stage. Defaults to 1.
+        pair_window (int): The maximum frame distance allowed between paired views. Defaults to 10.
+        pair_seed (int): The seed used to pick the neighbouring views. Defaults to 0.
     """
 
     shards_path_or_urls: Union[str, List[str]] = None
@@ -35,10 +39,9 @@ class DataModuleConfig(BaseConfig):
     decoder: str = "pil"
     handler: Callable = wds.warn_and_continue
     rename_files_fn: Optional[Callable[[str], str]] = None
-    pair_two_view: bool = False
     pair_num_views: int = 1
     pair_window: int = 10
-    use_depth: bool = False
+    pair_seed: int = 0
 
     def __post_init__(self):
         super().__post_init__()

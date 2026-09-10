@@ -8,14 +8,8 @@ from diffusers import FlowMatchEulerDiscreteScheduler
 from huggingface_hub import snapshot_download
 from safetensors.torch import load_file
 
-from syncfix.models.embedders import (
-    ConditionerWrapper,
-    LatentsConcatEmbedder,
-    LatentsConcatEmbedderConfig,
-)
+from syncfix.models.builder import build_conditioner, build_denoiser, build_vae
 from syncfix.models.syncfix import SyncFixConfig, SyncFixModel
-from syncfix.models.unets import DiffusersUNet2DCondWrapper
-from syncfix.models.vae import AutoencoderKLDiffusers, AutoencoderKLDiffusersConfig
 
 import numpy as np
 from syncfix.inference.colmap_read_write_model import qvec2rotmat
@@ -180,87 +174,16 @@ def _get_model_from_config(
     **kwargs,
 ):
 
-    conditioners = []
-
-    denoiser = DiffusersUNet2DCondWrapper(
-        in_channels=unet_input_channels,  # Add downsampled_image
-        out_channels=vae_num_channels,
-        center_input_sample=False,
-        flip_sin_to_cos=True,
-        freq_shift=0,
-        down_block_types=[
-            "DownBlock2D",
-            "CrossAttnDownBlock2D",
-            "CrossAttnDownBlock2D",
-        ],
-        mid_block_type="UNetMidBlock2DCrossAttn",
-        up_block_types=["CrossAttnUpBlock2D", "CrossAttnUpBlock2D", "UpBlock2D"],
-        only_cross_attention=False,
-        block_out_channels=[320, 640, 1280],
-        layers_per_block=2,
-        downsample_padding=1,
-        mid_block_scale_factor=1,
-        dropout=0.0,
-        act_fn="silu",
-        norm_num_groups=32,
-        norm_eps=1e-05,
-        cross_attention_dim=[320, 640, 1280],
-        transformer_layers_per_block=[1, 2, 10],
-        reverse_transformer_layers_per_block=None,
-        encoder_hid_dim=None,
-        encoder_hid_dim_type=None,
-        attention_head_dim=[5, 10, 20],
-        num_attention_heads=None,
-        dual_cross_attention=False,
-        use_linear_projection=True,
-        class_embed_type=None,
-        addition_embed_type=None,
-        addition_time_embed_dim=None,
-        num_class_embeds=None,
-        upcast_attention=None,
-        resnet_time_scale_shift="default",
-        resnet_skip_time_act=False,
-        resnet_out_scale_factor=1.0,
-        time_embedding_type="positional",
-        time_embedding_dim=None,
-        time_embedding_act_fn=None,
-        timestep_post_act=None,
-        time_cond_proj_dim=None,
-        conv_in_kernel=3,
-        conv_out_kernel=3,
-        projection_class_embeddings_input_dim=None,
-        attention_type="default",
-        class_embeddings_concat=False,
-        mid_block_only_cross_attention=None,
-        cross_attention_norm=None,
-        addition_embed_type_num_heads=64,
-    ).to(torch_dtype)
-
-    if conditioning_images_keys != [] or conditioning_masks_keys != []:
-
-        latents_concat_embedder_config = LatentsConcatEmbedderConfig(
-            image_keys=conditioning_images_keys,
-            mask_keys=conditioning_masks_keys,
-        )
-        latent_concat_embedder = LatentsConcatEmbedder(latents_concat_embedder_config)
-        latent_concat_embedder.freeze()
-        conditioners.append(latent_concat_embedder)
-
-        # Wrap conditioners and set to device
-    conditioner = ConditionerWrapper(
-        conditioners=conditioners,
+    denoiser = build_denoiser(
+        unet_input_channels=unet_input_channels,
+        vae_num_channels=vae_num_channels,
+        torch_dtype=torch_dtype,
     )
-
-    ## VAE ##
-    # Get VAE model
-    vae_config = AutoencoderKLDiffusersConfig(
-        version=backbone_signature,
-        subfolder="vae",
-        tiling_size=(128, 128),
+    conditioner = build_conditioner(
+        conditioning_images_keys=conditioning_images_keys,
+        conditioning_masks_keys=conditioning_masks_keys,
     )
-    vae = AutoencoderKLDiffusers(vae_config).to(torch_dtype)
-    vae.freeze()
-    vae.to(torch_dtype)
+    vae = build_vae(backbone_signature=backbone_signature, torch_dtype=torch_dtype)
 
     ## Diffusion Model ##
     # Get diffusion model
