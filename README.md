@@ -19,7 +19,7 @@ pip install -e .
 ```
 
 ## Model Checkpoint
-Please Download the checkpoint [here](https://drive.google.com/drive/folders/1RWGIQig_rUqH8xJXpdIjiUNOKAX1A4qE?usp=sharing).
+Please download the checkpoint [here](https://drive.google.com/drive/folders/1RWGIQig_rUqH8xJXpdIjiUNOKAX1A4qE?usp=sharing). The official model checkpoint is trained with official [DL3DV] (https://dl3dv-10k.github.io/DL3DV-10K/) dataset train-test split.
 
 ## Inference
 Run the top-level `inference.py` script to refine a degraded rendering or a directory of renderings.
@@ -28,6 +28,19 @@ Run the top-level `inference.py` script to refine a degraded rendering or a dire
 python inference.py \
   --input_image path/to/input_images \
   --ref_image path/to/reference_images \
+  --model_path path/to/model \
+  --output_dir output \
+  --n_per_pass 3 \
+  --ref_size 1
+```
+
+### Example
+Examples images in this [folder/](examples) 
+
+```bash
+python inference.py \
+  --input_image examples/degraded \
+  --ref_image examples/reference \
   --model_path path/to/model \
   --output_dir output \
   --n_per_pass 3 \
@@ -97,8 +110,32 @@ Only the denoiser is trained; the VAE, LPIPS and VGG networks stay frozen. Check
 a copy of the config are written to `save_ckpt_path`, which is directly usable as the
 `--model_path` of `inference.py`.
 
+## Cross-View Semantic Consistency Metric
+
+**CVSC** matches keypoints between two views with RaCo/ALIKED and LightGlue, or alternative models, keeps the epipolar inliers of a fundamental-matrix RANSAC, then samples DINOv3 patch features at the matches and averages their cosine similarity. The score is averaged over the consecutive pairs of a view sequence.
+
+The metric needs three dependencies beyond the base install:
+
+```bash
+pip install git+https://github.com/cvg/LightGlue.git
+pip install git+https://github.com/cvg/RaCo.git
+git clone https://github.com/facebookresearch/dinov3   # plus its pretrained weights
+```
+
+```bash
+python eval_cvsc.py \
+  --image_dir output \
+  --dinov3_repo path/to/dinov3 \
+  --dinov3_weights path/to/dinov3_vitl16_pretrain.pth \
+  --output_json output/cvsc.json
+```
+
+Views are scored in sorted filename order, so the directory should hold one sequence of
+a single scene. `syncfix.metrics.compute_cvsc` exposes the same computation for use
+inside an evaluation loop.
+
 ### Acknowledgements
-This project is built upon [LBM](https://github.com/gojasper/LBM), [Difix3D+](https://github.com/nv-tlabs/Difix3D), and [3DGS](https://github.com/graphdeco-inria/gaussian-splatting). We thank all the authors for their great work and for providing the code.
+This project is built upon [LBM](https://github.com/gojasper/LBM), [Difix3D+](https://github.com/nv-tlabs/Difix3D), and [3DGS](https://github.com/graphdeco-inria/gaussian-splatting). We thank all the authors for their great work and for providing the code. We also thank Zhaoliang Zhang, who trained the official model checkpoint with a mixed-higher-resolution strategy.
 
 ## Citation
 ```bibtex
