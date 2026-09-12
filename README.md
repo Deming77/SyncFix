@@ -19,7 +19,7 @@ pip install -e .
 ```
 
 ## Model Checkpoint
-Please download the checkpoint [here](https://drive.google.com/drive/folders/1RWGIQig_rUqH8xJXpdIjiUNOKAX1A4qE?usp=sharing). The official model checkpoint is trained with offical [DL3DV] (https://dl3dv-10k.github.io/DL3DV-10K/) dataset 3K split.
+Please download the checkpoint [here](https://drive.google.com/drive/folders/1RWGIQig_rUqH8xJXpdIjiUNOKAX1A4qE?usp=sharing). The official model checkpoint is trained with official [DL3DV](https://dl3dv-10k.github.io/DL3DV-10K/) dataset 3K split.
 
 ## Inference
 Run the top-level `inference.py` script to refine a degraded rendering or a directory of renderings.
